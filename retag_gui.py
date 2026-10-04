@@ -208,7 +208,9 @@ class RetagApp:
         self.tree.delete(*self.tree.get_children())
         for e in self.plan:
             status = e["status"]
-            if self.only_changes.get() and status != "change":
+            # Keep rows that were changed (or failed to) visible after Apply.
+            if (self.only_changes.get() and status not in ("change", "updated")
+                    and "write failed" not in status):
                 continue
             if status.startswith("error"):
                 tag = "error"

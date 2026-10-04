@@ -128,44 +128,54 @@ def find_audio_files(root):
                 yield os.path.join(dirpath, name)
 
 
-def build_plan(root, progress=None):
-    """Return a list of dicts describing what would happen to each file.
+def scan_library(root, progress=None):
+    """Read the genre of every audio file under root, without changing anything.
 
+    Returns a list of dicts: path, rel, current (first genre or ""), count
+    (number of genre values) and status ("ok", "no genre" or "error: ...").
     progress, if given, is called as progress(n, total) before the nth file.
     """
-    plan = []
+    entries = []
     paths = sorted(find_audio_files(root))
     for i, path in enumerate(paths, 1):
         if progress:
             progress(i, len(paths))
         entry = {"path": path, "rel": os.path.relpath(path, root),
-                 "current": "", "proposed": "", "status": ""}
+                 "current": "", "count": 0, "status": "ok"}
         try:
             audio = MutagenFile(path)
         except (MutagenError, OSError) as e:
             entry["status"] = f"error: {e}"
-            plan.append(entry)
+            entries.append(entry)
             continue
         if audio is None:
             entry["status"] = "error: unsupported/unrecognized file"
-            plan.append(entry)
+            entries.append(entry)
             continue
 
         genres = read_genres(audio)
-        if not genres:
-            entry["status"] = "no genre"
-            plan.append(entry)
-            continue
-
-        current = genres[0]
-        proposed = classify_genre(current)
-        entry["current"] = current
-        entry["proposed"] = proposed
-        # Multiple values collapse to one, so only "same" when nothing changes.
-        if proposed == current and len(genres) == 1:
-            entry["status"] = "same"
+        if genres:
+            entry["current"] = genres[0]
+            entry["count"] = len(genres)
         else:
-            entry["status"] = "change"
+            entry["status"] = "no genre"
+        entries.append(entry)
+    return entries
+
+
+def build_plan(root, progress=None):
+    """Return a list of dicts describing what the classifier would do to each file."""
+    plan = []
+    for e in scan_library(root, progress):
+        entry = {"path": e["path"], "rel": e["rel"], "current": e["current"],
+                 "proposed": "", "status": e["status"]}
+        if e["status"] == "ok":
+            entry["proposed"] = classify_genre(e["current"])
+            # Multiple values collapse to one, so only "same" when nothing changes.
+            if entry["proposed"] == e["current"] and e["count"] == 1:
+                entry["status"] = "same"
+            else:
+                entry["status"] = "change"
         plan.append(entry)
     return plan
 

@@ -7,7 +7,9 @@
 #   start             start Xvfb :99 and the GUI via ./launch.sh (in tmux session "gui")
 #   scan DIR          type DIR into the folder box and press Enter (starts a scan)
 #   browse DIR        the user path: Browse… -> folder dialog -> DIR (auto-scans)
-#   filter            toggle "Show only files that will change"
+#   select N [N..]    select table rows by 1-based position (several = Ctrl-click)
+#   genre 'A//B//C'   type Parent/Sub/Sub-sub into the dropdowns, click "Set genre"
+#   filter            toggle "Show only files with a new genre"
 #   apply             click "Apply changes", then Enter = "Yes" in the confirm dialog
 #   ok                press Enter (dismiss the result dialog)
 #   ss NAME           screenshot the whole display to $RUN_DIR/NAME.png
@@ -16,7 +18,7 @@
 #   shadowed          list rules whose own genre name is matched by another rule
 #   cli DIR [y|n]     run the command-line tool, answering the prompt with y or n
 #   stop              kill the GUI and Xvfb
-#   smoke             full user flow (browse, filter, apply) + assert tags; exit 1 on mismatch
+#   smoke             full user flow (browse, pick genres, custom genre, apply) + assert; exit 1 on mismatch
 set -euo pipefail
 
 REPO=$(cd "$(dirname "$0")/../../.." && pwd)
@@ -74,7 +76,7 @@ start)
     pgrep -f "Xvfb $DISPLAY" >/dev/null || { Xvfb "$DISPLAY" -screen 0 1100x700x24 >"$RUN_DIR/xvfb.log" 2>&1 & }
     wait_for 10 xdotool getmouselocation
     tmux kill-session -t gui 2>/dev/null || true
-    tmux new-session -d -s gui "cd '$REPO' && DISPLAY=$DISPLAY PATH='$RUN_DIR/bin':\$PATH ./launch.sh 2>&1 | tee '$RUN_DIR/gui.log'; sleep 3600"
+    tmux new-session -d -s gui "cd '$REPO' && GENRE_RETAGGER_CUSTOM='$RUN_DIR/custom_genres.json' DISPLAY=$DISPLAY PATH='$RUN_DIR/bin':\$PATH ./launch.sh 2>&1 | tee '$RUN_DIR/gui.log'; sleep 3600"
     wait_for 120 window
     sleep 0.5; echo "window $(window) up"; xdotool getwindowgeometry "$(window)"
     ;;
@@ -96,9 +98,32 @@ browse)
     wait_for 10 gone '^Choose your music folder$'
     sleep 2
     ;;
+select)
+    # Rows start at y=112 and are 20px apart (default sort: by file name).
+    shift; first=1
+    for n in "$@"; do
+        y=$(( 112 + 20 * (n - 1) ))
+        if [ $first = 1 ]; then xdotool mousemove 190 $y click 1; first=0
+        else xdotool keydown ctrl mousemove 190 $y click 1 keyup ctrl; fi
+    done
+    sleep 0.3
+    ;;
+genre)
+    IFS='/' read -r -a raw <<< "${2:?usage: genre 'Parent//Sub//Sub-sub'}"
+    parts=(); for p in "${raw[@]}"; do [ -n "$p" ] && parts+=("$p"); done
+    # Parent, Sub, Sub-sub dropdown text areas; Tk select-all is Ctrl+/.
+    i=0
+    for x in 190 480 800; do
+        xdotool mousemove $x 550 click 1; xdotool key ctrl+slash BackSpace
+        [ -n "${parts[$i]:-}" ] && xdotool type --delay 5 "${parts[$i]}"
+        i=$((i + 1))
+    done
+    xdotool mousemove 92 582 click 1   # "Set genre on N files"
+    sleep 0.4
+    ;;
 filter) xdotool mousemove 18 56 click 1; sleep 0.3 ;;
 apply)
-    xdotool mousemove 930 597 click 1
+    xdotool mousemove 930 637 click 1
     wait_for 10 visible '^Apply changes\?$'
     xdotool key Return   # askyesno defaults to Yes
     sleep 2
@@ -137,29 +162,38 @@ cli)
 stop)
     tmux kill-session -t gui 2>/dev/null || true
     pkill -f "Xvfb $DISPLAY" 2>/dev/null || true
+    # Wait for Xvfb to really exit, or an immediate `start` sees the dying
+    # process, skips launching a new one, and is left with no display.
+    wait_for 10 bash -c "! pgrep -f '[X]vfb $DISPLAY'"   # [X]: don't match this bash -c itself
     echo stopped
     ;;
 smoke)
+    rm -f "$RUN_DIR/custom_genres.json"
     "$0" fixtures >/dev/null
-    "$0" start >/dev/null
-    "$0" browse "$RUN_DIR/lib"; "$0" ss smoke_preview
-    "$0" filter; "$0" apply; "$0" ss smoke_applied; "$0" ok
-    "$0" tags > "$RUN_DIR/smoke_tags.txt"
+    "$0" stop >/dev/null; "$0" start >/dev/null
+    "$0" browse "$RUN_DIR/lib"; "$0" ss smoke_scanned
+    "$0" select 1;   "$0" genre 'Latin//Brazilian//Samba'   # from the dropdown lists
+    "$0" select 2 6; "$0" genre 'Rock//Dreamgaze'           # custom genre, two files
+    "$0" select 4;   "$0" genre 'Jazz'                      # file that had no genre
+    "$0" filter; "$0" ss smoke_pending
+    "$0" apply; "$0" ss smoke_applied; "$0" ok
+    { "$0" tags; echo "custom: $(tr -d ' \n' < "$RUN_DIR/custom_genres.json")"; } > "$RUN_DIR/smoke_tags.txt"
     "$0" stop >/dev/null
     cat > "$RUN_DIR/smoke_expected.txt" <<'TXT'
-03.m4a ['Latin//Bossa Nova']
-04.ogg ['Rock//Shoegaze']
+03.m4a ['Latin//Brazilian//Samba']
+04.ogg ['Rock//Dreamgaze']
 05.flac ['Jazz']
-06_none.mp3 None
+06_none.mp3 ['Jazz']
 07_broken.mp3 ERROR can't sync to MPEG frame
-Band/Album/01.mp3 ['Rock//Post-Punk']
-Band/Album/02.flac ['Reggae//Ska//Ska Punk']
+Band/Album/01.mp3 ['Rock//Dreamgaze']
+Band/Album/02.flac ['Ska Punk']
+custom: ["Rock//Dreamgaze"]
 TXT
     if diff -u "$RUN_DIR/smoke_expected.txt" "$RUN_DIR/smoke_tags.txt"; then
-        echo "SMOKE PASS (screenshots: $RUN_DIR/smoke_preview.png, smoke_applied.png)"
+        echo "SMOKE PASS (screenshots: $RUN_DIR/smoke_*.png)"
     else
         echo "SMOKE FAIL"; exit 1
     fi
     ;;
-*) sed -n '2,22p' "$0"; exit 1 ;;
+*) sed -n '2,25p' "$0"; exit 1 ;;
 esac

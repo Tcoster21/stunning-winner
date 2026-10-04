@@ -1,10 +1,12 @@
 ---
 name: run-stunning-winner
-description: Run, start, launch, drive, smoke-test and screenshot the Genre Retagger (Tkinter GUI + CLI that rewrites music genre tags with mutagen), test genre classifier rules, or check rule ordering. Use when asked to run the app or GUI, take a screenshot, try the retagger on sample files, or verify a change to genre_classifier.py, retag_genres.py, retag_gui.py or launch.sh.
+description: Run, start, launch, drive, smoke-test and screenshot the Genre Retagger (Tkinter GUI with Parent/Sub/Sub-sub genre dropdowns + auto-classifying CLI, writes music genre tags with mutagen), test genre classifier rules, or check rule ordering. Use when asked to run the app or GUI, take a screenshot, try the retagger on sample files, or verify a change to genre_classifier.py, retag_genres.py, retag_gui.py or launch.sh.
 ---
 
 The Genre Retagger is a Tkinter window (`retag_gui.py`, started by `launch.sh`) plus a CLI
-(`retag_genres.py`), and the genre rules live in `genre_classifier.py`. Drive everything with
+(`retag_genres.py`). In the window you pick genres by hand from three linked dropdowns: Parent,
+Sub and Sub-sub. Those are built by `genre_taxonomy.py` from the tags in `genre_classifier.py`
+plus any custom genres you've typed. The CLI auto-classifies files with the rules. Drive everything with
 `.claude/skills/run-stunning-winner/driver.sh`. It runs the real launcher on Xvfb and clicks the
 window with xdotool. All paths are relative to the repo root.
 
@@ -28,16 +30,21 @@ Python as `$RUN_DIR/bin/python3` so `launch.sh` picks it up. Expect `ready: tkin
 
 ## Run (agent path)
 
-Start with the one-shot check. It runs the full user flow (launch → Browse… → filter → Apply →
-Yes) and diffs the tags written to disk against the expected values:
+Start with the one-shot check. It runs the full user flow and diffs the tags written to disk,
+plus the saved custom-genre file, against the expected values. The flow:
+1. Launch, then Browse….
+2. Pick `Latin//Brazilian//Samba` from the lists for one file.
+3. Type the custom genre `Rock//Dreamgaze` and set it on two files at once.
+4. Give the untagged file `Jazz`.
+5. Filter, then Apply → Yes.
 
 ```bash
 .claude/skills/run-stunning-winner/driver.sh smoke   # -> SMOKE PASS, exit 0
 ```
 
-On a mismatch it prints a unified diff, `SMOKE FAIL`, and exits 1. To confirm it can fail, I broke
-the Bossa Nova rule and got `-03.m4a ['Latin//Bossa Nova'] / +03.m4a ['Jazz//Bossa Nova']`.
-Screenshots: `smoke_preview.png` and `smoke_applied.png`. Look at them after any GUI change.
+On a mismatch it prints a unified diff, `SMOKE FAIL`, and exits 1. Screenshots:
+`smoke_scanned.png`, `smoke_pending.png` (filtered, green "Will change" rows) and
+`smoke_applied.png`. Look at them after any GUI change.
 
 To drive it step by step:
 
@@ -47,19 +54,23 @@ $D fixtures                          # sample library -> /tmp/run-genre-retagger
 $D start                             # Xvfb :99 + ./launch.sh in tmux session "gui"
 $D browse /tmp/run-genre-retagger/lib  # Browse… -> Tk folder dialog -> auto-scan
 $D scan /tmp/run-genre-retagger/lib  # or: type path in the box + Enter (replaces old text)
-$D ss preview                        # -> /tmp/run-genre-retagger/preview.png  (look at it)
-$D filter                            # toggle "Show only files that will change"
+$D select 2 6                        # rows by position (1 = 03.m4a … 7 = Band/Album/02.flac)
+$D genre 'Rock//Dreamgaze'           # fill Parent/Sub/Sub-sub, click "Set genre on 2 files"
+$D ss pending                        # -> /tmp/run-genre-retagger/pending.png  (look at it)
+$D filter                            # toggle "Show only files with a new genre"
 $D apply                             # click Apply changes, Enter = Yes
-$D ss applied                        # summary dialog over blue "Updated" rows
-$D ok                                # dismiss the dialog
+$D ok                                # dismiss the "Updated: N" box
 $D tags                              # read the tags back from disk
 $D stop
 ```
 
-The expected `tags` output after applying is:
-`03.m4a ['Latin//Bossa Nova']`, `04.ogg ['Rock//Shoegaze']`, `05.flac ['Jazz']`,
-`06_none.mp3 None`, `07_broken.mp3 ERROR can't sync to MPEG frame`,
-`Band/Album/01.mp3 ['Rock//Post-Punk']`, `Band/Album/02.flac ['Reggae//Ska//Ska Punk']`.
+The fixture rows are, in order: 03.m4a (Bossa Nova), 04.ogg (Shoegaze), 05.flac (Jazz),
+06_none.mp3 (no genre), 07_broken.mp3 (unreadable), Band/Album/01.mp3 (Post-Punk) and
+Band/Album/02.flac (Ska Punk). After the block above, `tags` shows `Rock//Dreamgaze` on 04.ogg
+and Band/Album/01.mp3, and the other files are unchanged.
+
+Custom genres go to `$RUN_DIR/custom_genres.json` (the driver sets `GENRE_RETAGGER_CUSTOM`), so
+runs never touch `~/.genre_retagger_custom.json`. `smoke` deletes the file first.
 
 Screenshots and logs go in `/tmp/run-genre-retagger/` (override with `RUN_DIR`). The launcher's
 terminal output goes to `gui.log` there; it's empty on a healthy run.
@@ -101,8 +112,22 @@ been executed, because there's no Windows here.
 - **PEP 668:** `python3.12 -m pip install mutagen` fails with "externally-managed-environment".
   This is why everything goes through `.venv`, which is also the path `launch.sh` takes on first run.
 - **Clicks use fixed coordinates.** There's no window manager, so the main window sits at 0,0 at
-  1000x620: folder entry (400,21), filter checkbox (18,56), Apply (930,597). If you change the GUI
-  layout or the default `geometry`, update the numbers in `driver.sh`.
+  1000x660. Positions used:
+  - folder entry (400,21), Browse (805,21), filter checkbox (18,56)
+  - table rows from y=112, 20px apart
+  - Parent/Sub/Sub-sub text areas at (190|480|800, 550), Set genre (92,582)
+  - Apply (930,637)
+
+  If you change the GUI layout or the default `geometry`, update the numbers in `driver.sh`.
+- **The dropdowns are editable `ttk.Combobox`es.** `genre` types into them (Ctrl+/ then
+  BackSpace clears them, the same as the entry) rather than clicking list items, because list
+  popups land in different places. Typing a value that isn't in the list is how a custom genre
+  is made, so `genre` covers both cases.
+- **`stop` then `start` raced.** `pkill Xvfb` returns before the server exits, so `start` saw
+  it still alive, skipped launching one, and then had no display ("Can't open display").
+  `stop` now waits. It checks with `pgrep -f '[X]vfb :99'`; the `[X]` stops `pgrep` inside
+  `bash -c` from matching its own command line, which made the first version of that wait time
+  out.
 - **In a Tk entry, Ctrl+A moves to the start of the line; it doesn't select all.** Clearing the
   box with Ctrl+A then BackSpace left the old path in place, so the new one was typed in front of
   it (`/tmp/…/lib/tmp/…/lib`) and the app said "Please choose a folder that exists." Tk's

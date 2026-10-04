@@ -6,6 +6,7 @@
 #   fixtures [DIR]    generate a sample music library (mp3/flac/m4a/ogg, mixed genres)
 #   start             start Xvfb :99 and the GUI via ./launch.sh (in tmux session "gui")
 #   scan DIR          type DIR into the folder box and press Enter (starts a scan)
+#   browse DIR        the user path: Browse… -> folder dialog -> DIR (auto-scans)
 #   filter            toggle "Show only files that will change"
 #   apply             click "Apply changes", then Enter = "Yes" in the confirm dialog
 #   ok                press Enter (dismiss the result dialog)
@@ -15,6 +16,7 @@
 #   shadowed          list rules whose own genre name is matched by another rule
 #   cli DIR [y|n]     run the command-line tool, answering the prompt with y or n
 #   stop              kill the GUI and Xvfb
+#   smoke             full user flow (browse, filter, apply) + assert tags; exit 1 on mismatch
 set -euo pipefail
 
 REPO=$(cd "$(dirname "$0")/../../.." && pwd)
@@ -38,6 +40,11 @@ wait_for() {  # wait_for <seconds> <command...>
 }
 
 window() { xdotool search --name '^Genre Retagger$' | head -1; }
+
+# Tk withdraws dialogs instead of destroying them, so a closed dialog is still
+# found by a plain `xdotool search`. Always match visible windows only.
+visible() { xdotool search --onlyvisible --name "$1"; }
+gone() { ! visible "$1"; }
 
 case "${1:-}" in
 setup)
@@ -74,14 +81,25 @@ start)
 scan)
     D=${2:?usage: scan DIR}
     # No window manager: the main window sits at 0,0, 1000x620. Folder entry at (400,21).
-    xdotool mousemove 400 21 click 1; xdotool key ctrl+a BackSpace
+    # Tk entry: Ctrl+A is "start of line", NOT select-all. Select-all is Ctrl+/.
+    xdotool mousemove 400 21 click 1; xdotool key ctrl+slash BackSpace
     xdotool type --delay 5 "$D"; xdotool key Return
+    sleep 2
+    ;;
+browse)
+    D=${2:?usage: browse DIR}
+    xdotool mousemove 805 21 click 1
+    wait_for 10 visible '^Choose your music folder$'
+    # Selection field is focused and pre-selected, so typing replaces it.
+    # 1st Enter only navigates INTO the folder; 2nd Enter accepts it.
+    xdotool type --delay 5 "$D"; xdotool key Return; sleep 0.5; xdotool key Return
+    wait_for 10 gone '^Choose your music folder$'
     sleep 2
     ;;
 filter) xdotool mousemove 18 56 click 1; sleep 0.3 ;;
 apply)
     xdotool mousemove 930 597 click 1
-    wait_for 10 xdotool search --name '^Apply changes\?$'
+    wait_for 10 visible '^Apply changes\?$'
     xdotool key Return   # askyesno defaults to Yes
     sleep 2
     ;;
@@ -121,5 +139,27 @@ stop)
     pkill -f "Xvfb $DISPLAY" 2>/dev/null || true
     echo stopped
     ;;
-*) sed -n '2,20p' "$0"; exit 1 ;;
+smoke)
+    "$0" fixtures >/dev/null
+    "$0" start >/dev/null
+    "$0" browse "$RUN_DIR/lib"; "$0" ss smoke_preview
+    "$0" filter; "$0" apply; "$0" ss smoke_applied; "$0" ok
+    "$0" tags > "$RUN_DIR/smoke_tags.txt"
+    "$0" stop >/dev/null
+    cat > "$RUN_DIR/smoke_expected.txt" <<'TXT'
+03.m4a ['Latin//Bossa Nova']
+04.ogg ['Rock//Shoegaze']
+05.flac ['Jazz']
+06_none.mp3 None
+07_broken.mp3 ERROR can't sync to MPEG frame
+Band/Album/01.mp3 ['Rock//Post-Punk']
+Band/Album/02.flac ['Reggae//Ska//Ska Punk']
+TXT
+    if diff -u "$RUN_DIR/smoke_expected.txt" "$RUN_DIR/smoke_tags.txt"; then
+        echo "SMOKE PASS (screenshots: $RUN_DIR/smoke_preview.png, smoke_applied.png)"
+    else
+        echo "SMOKE FAIL"; exit 1
+    fi
+    ;;
+*) sed -n '2,22p' "$0"; exit 1 ;;
 esac

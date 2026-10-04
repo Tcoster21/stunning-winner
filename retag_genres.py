@@ -128,10 +128,16 @@ def find_audio_files(root):
                 yield os.path.join(dirpath, name)
 
 
-def build_plan(root):
-    """Return a list of dicts describing what would happen to each file."""
+def build_plan(root, progress=None):
+    """Return a list of dicts describing what would happen to each file.
+
+    progress, if given, is called as progress(n, total) before the nth file.
+    """
     plan = []
-    for path in sorted(find_audio_files(root)):
+    paths = sorted(find_audio_files(root))
+    for i, path in enumerate(paths, 1):
+        if progress:
+            progress(i, len(paths))
         entry = {"path": path, "rel": os.path.relpath(path, root),
                  "current": "", "proposed": "", "status": ""}
         try:
